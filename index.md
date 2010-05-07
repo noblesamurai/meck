@@ -51,18 +51,19 @@ Build and Install
 
 To build meck and run the tests, simply type:
 
-   make test
+    make test
 
-To install meck, put it in your project directory where your Erlang applications are located and make sure that the load path to the `meck/ebin` folder is set up correctly (if you want to run from the shell, do `code:add_patha("/path/to/meck/ebin")`).
+To install meck, put it in your project directory where your Erlang applications are located and make sure that the load path to the `meck/ebin` folder is set up correctly (if you want to run from the shell, do `code:add_patha("/path/to/meck/ebin")`). For more instructions, see [Build and Install][4] on the meck wiki.
 
 Happy hacking!
 
 Feedback
 --------
 
-Please create and vote for issues at the [issue tracker for meck][4].
+Please create and vote for issues at the [issue tracker for meck][5].
 
 [1]: http://github.com/eproxus/meck/zipball/master "Zip file containing the latest version of meck"
 [2]: http://github.com/eproxus/meck/tarball/master "Tar file containing the latest version of meck"
 [3]: http://git-scm.com/ "Git, the fast version control system"
-[4]: http://github.com/eproxus/meck/issues "meck issue tracker on Github"
+[4]: http://wiki.github.com/eproxus/meck/build-and-install "How to build and install meck"
+[5]: http://github.com/eproxus/meck/issues "meck issue tracker on Github"
