@@ -1,0 +1,70 @@
+/* Main page layout */
+
+body {
+    margin-top: 1.0em;
+    margin-bottom: 2.0em;
+    background-color: #FFFFFF;
+    font-family: "Trebuchet MS", Helvetica, Arial, FreeSans;
+    color: #222;
+}
+#main {
+    margin: 0 auto;
+    max-width: 700px;
+}
+
+/* Headers */
+
+h1, h2, h3 { 
+    color: #860404;
+}
+h1, h1 a { 
+    font-size: 3.8em;
+    margin-bottom: 3px;
+    text-decoration: none;
+    text-shadow: #888 0 3px 10px;
+}
+h2 { 
+    font-size: 1.2em;
+    text-transform: uppercase;
+    text-shadow: #888 0 1px 3px;
+}
+h3 { text-align: center; }
+
+/* Special */
+
+.description  { 
+    font-size: 1.2em; 
+    margin-bottom: 30px; 
+    margin-top: 30px;
+    font-style: italic;
+}
+
+.download { float: right; }
+
+code {
+    font-size: 0.8em;
+    font-family: Consolas, FreeMono, monospace;
+}
+
+pre {
+    margin-left: 20px;
+    margin-right: 30px;
+    padding: 15px;
+    background: #ddd;
+    color: #000;
+    -webkit-border-radius: 5px;
+    -webkit-border-bottom-right-radius: 20px;
+    -moz-border-radius: 5px;
+    -moz-border-radius-bottomright: 20px;
+    border-radius: 5px;
+    border-bottom-right-radius: 20px;
+}
+
+hr { border: 0; width: 80%; border-bottom: 1px solid #aaa}
+
+#footer {
+    color: #888;
+    text-align: center;
+    padding-top: 50px;
+    font-style: italic; 
+}
