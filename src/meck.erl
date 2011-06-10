@@ -1,5 +1,5 @@
 %%==============================================================================
-%% Copyright 2010 Erlang Solutions Ltd.
+%% Copyright 2011 Adam Lindberg & Erlang Solutions Ltd.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -26,6 +26,8 @@
 -export([new/2]).
 -export([expect/3]).
 -export([expect/4]).
+-export([sequence/4]).
+-export([loop/4]).
 -export([delete/3]).
 -export([exception/2]).
 -export([passthrough/1]).
@@ -65,6 +67,9 @@
                 valid = true :: boolean(),
                 history = [] :: history(),
                 original :: term()}).
+
+%% Includes
+-include("meck_abstract.hrl").
 
 %%==============================================================================
 %% Interface exports
@@ -136,6 +141,43 @@ expect(Mod, Func, Arity, Result)
     call(Mod, {expect, Func, Arity, Result});
 expect(Mod, Func, Arity, Result) when is_list(Mod) ->
     lists:foreach(fun(M) -> expect(M, Func, Arity, Result) end, Mod),
+    ok.
+
+%% @spec sequence(Mod:: atom() | list(atom()), Func::atom(),
+%%                Arity::pos_integer(), Sequence::[term()]) -> ok
+%% @doc Adds an expectation which returns a value from `Sequence'
+%% until exhausted.
+%%
+%% This creates an expectation which takes `Arity' number of arguments
+%% and returns one element from `Sequence' at a time. Thus, calls to
+%% this expect will exhaust the list of return values in order until
+%% the last value is reached. That value is then returned for all
+%% subsequent calls.
+-spec sequence(Mod:: atom() | [atom()], Func::atom(),
+               Arity::pos_integer(), Sequence::[term()]) -> ok.
+sequence(Mod, Func, Arity, Sequence)
+  when is_atom(Mod), is_atom(Func), is_integer(Arity), Arity >= 0 ->
+    call(Mod, {sequence, Func, Arity, Sequence});
+sequence(Mod, Func, Arity, Sequence) when is_list(Mod) ->
+    lists:foreach(fun(M) -> sequence(M, Func, Arity, Sequence) end, Mod),
+    ok.
+
+%% @spec loop(Mod:: atom() | list(atom()), Func::atom(),
+%%            Arity::pos_integer(), Loop::[term()]) -> ok
+%% @doc Adds an expectation which returns a value from `Loop'
+%% infinitely.
+%%
+%% This creates an expectation which takes `Arity' number of arguments
+%% and returns one element from `Loop' at a time. Thus, calls to this
+%% expect will return one element at a time from the list and will
+%% restart at the first element when the end is reached.
+-spec loop(Mod:: atom() | [atom()], Func::atom(),
+           Arity::pos_integer(), Loop::[term()]) -> ok.
+loop(Mod, Func, Arity, Loop)
+  when is_atom(Mod), is_atom(Func), is_integer(Arity), Arity >= 0 ->
+    call(Mod, {loop, Func, Arity, Loop});
+loop(Mod, Func, Arity, Loop) when is_list(Mod) ->
+    lists:foreach(fun(M) -> loop(M, Func, Arity, Loop) end, Mod),
     ok.
 
 %% @spec delete(Mod:: atom() | list(atom()), Func::atom(),
@@ -238,13 +280,13 @@ init([Mod, Options]) ->
     Original = backup_original(Mod),
     process_flag(trap_exit, true),
     Expects = init_expects(Mod, Options),
-    compile_forms(to_forms(Mod, Expects)),
+    meck_mod:compile_and_load_forms(to_forms(Mod, Expects)),
     {ok, #state{mod = Mod, expects = Expects, original = Original}}.
 
 %% @hidden
 handle_call({get_expect, Func, Arity}, _From, S) ->
-    Expect = get_expect(S#state.expects, Func, Arity),
-    {reply, Expect, S};
+    {Expect, NewExpects} = get_expect(S#state.expects, Func, Arity),
+    {reply, Expect, S#state{expects = NewExpects}};
 handle_call({expect, Func, Expect}, _From, S) ->
     NewExpects = store_expect(S#state.mod, Func, Expect, S#state.expects),
     {reply, ok, S#state{expects = NewExpects}};
@@ -252,13 +294,19 @@ handle_call({expect, Func, Arity, Result}, _From, S) ->
     NewExpects = store_expect(S#state.mod, Func, {anon, Arity, Result},
                               S#state.expects),
     {reply, ok, S#state{expects = NewExpects}};
+handle_call({sequence, Func, Arity, Sequence}, _From, S) ->
+    NewExpects = store_expect(S#state.mod, Func, {sequence, Arity, Sequence},
+                              S#state.expects),
+    {reply, ok, S#state{expects = NewExpects}};
+handle_call({loop, Func, Arity, Loop}, _From, S) ->
+    NewExpects = store_expect(S#state.mod, Func, {loop, Arity, Loop, Loop},
+                              S#state.expects),
+    {reply, ok, S#state{expects = NewExpects}};
 handle_call({delete, Func, Arity}, _From, S) ->
     NewExpects = delete_expect(S#state.mod, Func, Arity, S#state.expects),
     {reply, ok, S#state{expects = NewExpects}};
 handle_call(history, _From, S) ->
     {reply, lists:reverse(S#state.history), S};
-handle_call({add_history, Item}, _From, S) ->
-    {reply, ok, S#state{history = [Item| S#state.history]}};
 handle_call(invalidate, _From, S) ->
     {reply, ok, S#state{valid = false}};
 handle_call(validate, _From, S) ->
@@ -267,7 +315,10 @@ handle_call(stop, _From, S) ->
     {stop, normal, ok, S}.
 
 %% @hidden
-handle_cast(_Msg, S)  -> {noreply, S}.
+handle_cast({add_history, Item}, S) ->
+    {noreply, S#state{history = [Item| S#state.history]}};
+handle_cast(_Msg, S)  ->
+    {noreply, S}.
 
 %% @hidden
 handle_info(_Info, S) -> {noreply, S}.
@@ -285,7 +336,7 @@ code_change(_OldVsn, S, _Extra) -> {ok, S}.
 exec(Mod, Func, Arity, Args) ->
     Expect = call(Mod, {get_expect, Func, Arity}),
     try Result = call_expect(Mod, Func, Expect, Args),
-        call(Mod, {add_history, {{Mod, Func, Args}, Result}}),
+        cast(Mod, {add_history, {{Mod, Func, Args}, Result}}),
         Result
     catch
         throw:Fun when is_function(Fun) ->
@@ -312,9 +363,12 @@ start(Mod, Options) ->
 start(Func, Mod, Options) ->
     gen_server:Func({local, proc_name(Mod)}, ?MODULE, [Mod, Options], []).
 
-call(Mod, Msg) ->
+cast(Mod, Msg) -> gen_server(cast, Mod, Msg).
+call(Mod, Msg) -> gen_server(call, Mod, Msg).
+
+gen_server(Func, Mod, Msg) ->
     Name = proc_name(Mod),
-    try gen_server:call(Name, Msg)
+    try gen_server:Func(Name, Msg)
     catch exit:_Reason -> erlang:error({not_mocked, Mod}) end.
 
 proc_name(Name) -> list_to_atom(atom_to_list(Name) ++ "_meck").
@@ -349,7 +403,21 @@ init_expects(Mod, Options) ->
 
 
 get_expect(Expects, Func, Arity) ->
-    e_fetch(Expects, Func, Arity).
+    case e_fetch(Expects, Func, Arity) of
+        {sequence, Arity, [Result]} ->
+            {{sequence, Arity, Result}, Expects};
+        {sequence, Arity, [Result|Rest]} ->
+            {{sequence, Arity, Result},
+             e_store(Expects, Func, {sequence, Arity, Rest})};
+        {loop, Arity, [Result], Loop} ->
+            {{loop, Arity, Result},
+             e_store(Expects, Func, {loop, Arity, Loop, Loop})};
+        {loop, Arity, [Result|Rest], Loop} ->
+            {{loop, Arity, Result},
+             e_store(Expects, Func, {loop, Arity, Rest, Loop})};
+        Other ->
+            {Other, Expects}
+    end.
 
 store_expect(Mod, Func, Expect, Expects) ->
     change_expects(fun e_store/3, Mod, Func, Expect, Expects).
@@ -359,11 +427,7 @@ delete_expect(Mod, Func, Arity, Expects) ->
 
 change_expects(Op, Mod, Func, Value, Expects) ->
     NewExpects = Op(Expects, Func, Value),
-    % only recompile if function was added or arity was changed
-    case interface_equal(NewExpects, Expects) of
-        true  -> ok;
-        false -> compile_forms(to_forms(Mod, NewExpects))
-    end,
+    meck_mod:compile_and_load_forms(to_forms(Mod, NewExpects)),
     NewExpects.
 
 e_store(Expects, Func, Expect) ->
@@ -375,49 +439,78 @@ e_fetch(Expects, Func, Arity) ->
 e_delete(Expects, Func, Arity) ->
     dict:erase({Func, Arity}, Expects).
 
-interface_equal(NewExpects, OldExpects) ->
-    dict:fetch_keys(NewExpects) == dict:fetch_keys(OldExpects).
-
 %% --- Code generation ---------------------------------------------------------
 
-func(Mod, {Func, Arity}) ->
+func(Mod, {Func, Arity}, {anon, Arity, Result}) ->
+   case contains_opaque(Result) of
+       true ->
+            func_exec(Mod, Func, Arity);
+       false ->
+           func_native(Mod, Func, Arity, Result)
+   end;
+func(Mod, {Func, Arity}, _Expect) ->
+    func_exec(Mod, Func, Arity).
+
+func_exec(Mod, Func, Arity) ->
     Args = args(Arity),
-    {function, ?LINE, Func, Arity,
-     [{clause, ?LINE, Args, [],
-       [{call, ?LINE, {remote, ?LINE, atom(?MODULE), atom(exec)},
-         [atom(Mod), atom(Func), integer(Arity), var_list(Args)]}]}]}.
+    ?function(Func, Arity,
+              [?clause(Args,
+                       [?call(?MODULE, exec,
+                              [?atom(Mod), ?atom(Func), ?integer(Arity),
+                               list(Args)])])]).
+
+func_native(Mod, Func, Arity, Result) ->
+    Args = args(Arity),
+    AbsResult = erl_parse:abstract(Result),
+    ?function(
+       Func, Arity,
+       [?clause(
+           Args,
+           [?call(gen_server, cast,
+                  [?atom(proc_name(Mod)),
+                   ?tuple([?atom(add_history),
+                           ?tuple([?tuple([?atom(Mod), ?atom(Func),
+                                           list(Args)]),
+                                   AbsResult])])]),
+            AbsResult])]).
+
+contains_opaque(Term) when is_pid(Term); is_port(Term); is_function(Term) ->
+    true;
+contains_opaque(Term) when is_list(Term) ->
+    lists:any(fun contains_opaque/1, Term);
+contains_opaque(Term) when is_tuple(Term) ->
+    lists:any(fun contains_opaque/1, tuple_to_list(Term));
+contains_opaque(_Term) ->
+    false.
+
 
 to_forms(Mod, Expects) ->
     {Exports, Functions} = functions(Mod, Expects),
-    [attribute(module, Mod)] ++ Exports ++ Functions.
+    [?attribute(module, Mod)] ++ Exports ++ Functions.
 
 functions(Mod, Expects) ->
-    dict:fold(fun(Export, _Expect, {Exports, Functions}) ->
-                      {[attribute(export, [Export])|Exports],
-                       [func(Mod, Export)|Functions]}
+    dict:fold(fun(Export, Expect, {Exports, Functions}) ->
+                      {[?attribute(export, [Export])|Exports],
+                       [func(Mod, Export, Expect)|Functions]}
               end, {[], []}, Expects).
 
 args(0)     -> [];
-args(Arity) -> [var(var_name(N)) || N<- lists:seq(1, Arity)].
+args(Arity) -> [?var(var_name(N)) || N <- lists:seq(1, Arity)].
 
-var_list([])    -> {nil, ?LINE};
-var_list([H|T]) -> {cons, ?LINE, H, var_list(T)}.
-
-var(Name) -> {var, ?LINE, Name}.
+list([])    -> {nil, ?LINE};
+list([H|T]) -> {cons, ?LINE, H, list(T)}.
 
 var_name(A) -> list_to_atom("A"++integer_to_list(A)).
 
 arity({anon, Arity, _Result}) ->
     Arity;
+arity({sequence, Arity, _Sequence}) ->
+    Arity;
+arity({loop, Arity, _Current, _Loop}) ->
+    Arity;
 arity(Fun) when is_function(Fun) ->
     {arity, Arity} = erlang:fun_info(Fun, arity),
     Arity.
-
-attribute(Attribute, Args) -> {attribute, ?LINE, Attribute, Args}.
-
-atom(Atom) when is_atom(Atom) -> {atom, ?LINE, Atom}.
-
-integer(Integer) when is_integer(Integer) -> {integer, ?LINE, Integer}.
 
 %% --- Execution utilities -----------------------------------------------------
 
@@ -434,7 +527,7 @@ handle_mock_exception(Mod, Func, Fun, Args) ->
         {passthrough, Args} ->
             % call_original(Args) called from mock function
             Result = apply(original_name(Mod), Func, Args),
-            call(Mod, {add_history, {{Mod, Func, Args}, Result}}),
+            cast(Mod, {add_history, {{Mod, Func, Args}, Result}}),
             Result
     end.
 
@@ -445,14 +538,14 @@ invalidate_and_raise(Mod, Func, Args, Class, Reason) ->
 
 raise(Mod, Func, Args, Class, Reason) ->
     Stacktrace = inject(Mod, Func, Args, erlang:get_stacktrace()),
-    call(Mod, {add_history, {{Mod, Func, Args}, Class, Reason, Stacktrace}}),
+    cast(Mod, {add_history, {{Mod, Func, Args}, Class, Reason, Stacktrace}}),
     erlang:raise(Class, Reason, Stacktrace).
 
 mock_exception_fun(Class, Reason) -> fun() -> {exception, Class, Reason} end.
 
 passthrough_fun(Args) -> fun() -> {passthrough, Args} end.
 
-call_expect(_Mod, _Func, {anon, Arity, Return}, VarList)
+call_expect(_Mod, _Func, {_Type, Arity, Return}, VarList)
   when Arity == length(VarList) ->
     Return;
 call_expect(Mod, Func, passthrough, VarList) ->
@@ -474,9 +567,10 @@ is_mock_exception(Fun) -> is_local_function(Fun).
 backup_original(Module) ->
     Cover = get_cover_state(Module),
     try
-        Forms = abstract_code(beam_file(Module)),
+        Forms = meck_mod:abstract_code(meck_mod:beam_file(Module)),
         NewName = original_name(Module),
-        compile_forms(rename_module(Forms, NewName), compile_options(Module))
+        meck_mod:compile_and_load_forms(meck_mod:rename_module(Forms, NewName),
+                                        meck_mod:compile_options(Module))
     catch
         throw:{object_code_not_found, _Module} -> ok; % TODO: What to do here?
         throw:no_abstract_code                 -> ok  % TODO: What to do here?
@@ -503,7 +597,7 @@ get_cover_state(Module, {file, File}) ->
     ok = cover:export(Data, Module),
     CompileOptions =
         try
-            compile_options(beam_file(Module))
+            meck_mod:compile_options(meck_mod:beam_file(Module))
         catch
             throw:{object_code_not_found, _Module} -> []
         end,
@@ -517,52 +611,6 @@ exists(Module) ->
 exports(Module) ->
     [ FA ||  FA  <- Module:module_info(exports),
              FA /= {module_info, 0}, FA /= {module_info, 1}].
-
-compile_forms(AbsCode) -> compile_forms(AbsCode, []).
-
-compile_forms(AbsCode, Opts) ->
-    case compile:forms(AbsCode, Opts) of
-        {ok, ModName, Binary} ->
-            load_binary(ModName, Binary);
-        {ok, ModName, Binary, _Warnings} ->
-            load_binary(ModName, Binary)
-    end.
-
-load_binary(Name, Binary) ->
-    case code:load_binary(Name, "", Binary) of
-        {module, Name}  -> ok;
-        {error, Reason} -> exit({error_loading_module, Name, Reason})
-    end.
-
-beam_file(Module) ->
-    % code:which/1 cannot be used for cover_compiled modules
-    case code:get_object_code(Module) of
-        {_, Binary, _Filename} -> Binary;
-        error                  -> throw({object_code_not_found, Module})
-    end.
-
-abstract_code(BeamFile) ->
-    case beam_lib:chunks(BeamFile, [abstract_code]) of
-        {ok, {_, [{abstract_code, {raw_abstract_v1, Forms}}]}} ->
-            Forms;
-        {ok, {_, [{abstract_code, no_abstract_code}]}} ->
-            throw(no_abstract_code)
-    end.
-
-compile_options(BeamFile) when is_binary(BeamFile) ->
-    case beam_lib:chunks(BeamFile, [compile_info]) of
-        {ok, {_, [{compile_info, Info}]}} ->
-            proplists:get_value(options, Info);
-        _ ->
-            []
-    end;
-compile_options(Module) ->
-    proplists:get_value(options, Module:module_info(compile)).
-
-rename_module([{attribute, Line, module, _OldName}|T], NewName) ->
-    [{attribute, Line, module, NewName}|T];
-rename_module([H|T], NewName) ->
-    [H|rename_module(T, NewName)].
 
 cleanup(Mod) ->
     code:purge(Mod),

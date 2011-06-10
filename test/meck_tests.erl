@@ -55,6 +55,8 @@ meck_test_() ->
                            fun shortcut_expect_negative_arity_/1,
                            fun shortcut_call_return_value_/1,
                            fun shortcut_call_argument_/1,
+                           fun shortcut_re_add_/1,
+                           fun shortcut_opaque_/1,
                            fun delete_/1,
                            fun called_false_no_args_/1,
                            fun called_true_no_args_/1,
@@ -64,7 +66,11 @@ meck_test_() ->
                            fun called_false_few_args_/1,
                            fun called_true_few_args_/1,
                            fun called_false_error_/1,
-                           fun called_true_error_/1
+                           fun called_true_error_/1,
+                           fun sequence_/1,
+                           fun sequence_multi_/1,
+                           fun loop_/1,
+                           fun loop_multi_/1
                           ]]}.
 
 setup() ->
@@ -188,12 +194,8 @@ caller_does_not_crash_on_reload_(Mod) ->
 change_func_(Mod) ->
     ok = meck:expect(Mod, test, fun() -> 1 end),
     ?assertEqual(1, Mod:test()),
-    MTime = proplists:get_value(time, Mod:module_info(compile)),
-    % recompile will result in increased module_info time
-    timer:sleep(1100),
     ok = meck:expect(Mod, test, fun() -> 2 end),
-    ?assertEqual(2, Mod:test()),
-    ?assertEqual(MTime, proplists:get_value(time, Mod:module_info(compile))).
+    ?assertEqual(2, Mod:test()).
 
 call_original_undef_(Mod) ->
     ok = meck:expect(Mod, test, fun() -> meck:passthrough([]) end),
@@ -205,10 +207,13 @@ history_empty_(Mod) ->
 history_call_(Mod) ->
     ok = meck:expect(Mod, test, fun() -> ok end),
     ok = meck:expect(Mod, test2, fun(_, _) -> result end),
+    ok = meck:expect(Mod, test3, 0, 3),
     Mod:test(),
     Mod:test2(a, b),
-    ?assertEqual([{{Mod, test, []}, ok},
-                  {{Mod, test2, [a, b]}, result}], meck:history(Mod)).
+    Mod:test3(),
+    ?assertEqual([{{Mod, test,  []},     ok},
+                  {{Mod, test2, [a, b]}, result},
+                  {{Mod, test3, []},     3}], meck:history(Mod)).
 
 history_throw_(Mod) ->
     ok = meck:expect(Mod, test, fun() -> throw(test_exception) end),
@@ -283,9 +288,20 @@ shortcut_call_return_value_(Mod) ->
     ?assertEqual(true, meck:validate(Mod)).
 
 shortcut_call_argument_(Mod) ->
-    ok = meck:expect(Mod, test, fun(hest, 1) -> apa end),
+    ok = meck:expect(Mod, test, 2, apa),
     ?assertEqual(apa, Mod:test(hest, 1)),
     ?assertEqual(true, meck:validate(Mod)).
+
+shortcut_re_add_(Mod) ->
+    ok = meck:expect(Mod, test, 2, apa),
+    ?assertEqual(apa, Mod:test(hest, 1)),
+    ok = meck:expect(Mod, test, 2, new),
+    ?assertEqual(new, Mod:test(hest, 1)),
+    ?assertEqual(true, meck:validate(Mod)).
+
+shortcut_opaque_(Mod) ->
+    ok = meck:expect(Mod, test, 0, self()),
+    ?assertMatch(P when is_pid(P), Mod:test()).
 
 delete_(Mod) ->
     ok = meck:expect(Mod, test, 2, ok),
@@ -371,6 +387,45 @@ called_true_error_(Mod) ->
     catch Mod:test(Arg1, Arg2, Arg3),
     ?assertEqual(true, meck:called(Mod, test, Args)),
     ?assert(meck:validate(Mod)).
+
+sequence_(Mod) ->
+    Sequence = [a, b, c, d, e],
+    ?assertEqual(ok, meck:sequence(Mod, s, 2, Sequence)),
+    ?assertEqual(Sequence,
+                 [Mod:s(a, b) || _ <- lists:seq(1, length(Sequence))]),
+    ?assertEqual([e, e, e, e, e],
+                 [Mod:s(a, b) || _ <- lists:seq(1, 5)]),
+    ?assert(meck:validate(Mod)).
+
+sequence_multi_(Mod) ->
+    meck:new(mymod2),
+    Mods = [Mod, mymod2],
+    Sequence = [a, b, c, d, e],
+    ?assertEqual(ok, meck:sequence(Mods, s, 2, Sequence)),
+    ?assertEqual(Sequence,
+                 [Mod:s(a, b) || _ <- lists:seq(1, length(Sequence))]),
+    ?assertEqual([e, e, e, e, e],
+                 [Mod:s(a, b) || _ <- lists:seq(1, 5)]),
+    ?assertEqual(Sequence,
+                 [mymod2:s(a, b) || _ <- lists:seq(1, length(Sequence))]),
+    ?assertEqual([e, e, e, e, e],
+                 [mymod2:s(a, b) || _ <- lists:seq(1, 5)]),
+    ?assert(meck:validate(Mods)).
+
+loop_(Mod) ->
+    Loop = [a, b, c, d, e],
+    ?assertEqual(ok, meck:loop(Mod, l, 2, Loop)),
+    [?assertEqual(V, Mod:l(a, b)) || _ <- lists:seq(1, length(Loop)), V <- Loop],
+    ?assert(meck:validate(Mod)).
+
+loop_multi_(Mod) ->
+    meck:new(mymod2),
+    Mods = [Mod, mymod2],
+    Loop = [a, b, c, d, e],
+    ?assertEqual(ok, meck:loop(Mods, l, 2, Loop)),
+    [[?assertEqual(V, M:l(a, b)) || _ <- lists:seq(1, length(Loop)), V <- Loop]
+     || M <- Mods],
+    ?assert(meck:validate(Mods)).
 
 %% --- Tests with own setup ----------------------------------------------------
 
@@ -595,7 +650,7 @@ remote_meck_test_() ->
 
 remote_setup() ->
     [] = os:cmd("epmd -daemon"),
-    {ok, Hostname} = inet:gethostname(),
+    Hostname = "localhost",
     Myself = list_to_atom("meck_eunit_test@" ++ Hostname),
     net_kernel:start([Myself, shortnames]),
     {ok, Node} = slave:start_link(list_to_atom(Hostname), meck_remote_test,
