@@ -300,8 +300,8 @@ shortcut_re_add_(Mod) ->
     ?assertEqual(true, meck:validate(Mod)).
 
 shortcut_opaque_(Mod) ->
-    ok = meck:expect(Mod, test, 0, self()),
-    ?assertMatch(P when is_pid(P), Mod:test()).
+    ok = meck:expect(Mod, test, 0, {test, [a, self()]}),
+    ?assertMatch({test, [a, P]} when P == self(), Mod:test()).
 
 delete_(Mod) ->
     ok = meck:expect(Mod, test, 2, ok),
@@ -430,6 +430,7 @@ loop_multi_(Mod) ->
 %% --- Tests with own setup ----------------------------------------------------
 
 call_original_test() ->
+    false = code:purge(meck_test_module),
     ?assertEqual({module, meck_test_module}, code:load_file(meck_test_module)),
     ok = meck:new(meck_test_module),
     ?assertEqual({file, ""}, code:is_loaded(meck_test_module_meck_original)),
@@ -578,7 +579,7 @@ unlink_test() ->
     ?assert(not lists:member(self(), Links)),
     ok = meck:unload(mymod).
 
-%% @doc Exception is thrown when you run expect on a non-existing module.
+%% @doc Exception is thrown when you run expect on a non-existing (and not yet mocked) module.
 expect_without_new_test() ->
     ?assertError({not_mocked, othermod},
                  meck:expect(othermod, test, fun() -> ok end)).
@@ -673,3 +674,61 @@ remote_meck_cover_({Node, Mod}) ->
     {ok, Mod} = cover:compile(Mod),
     {ok, _Nodes} = cover:start([Node]),
     ?assertEqual(ok, rpc:call(Node, meck, new, [Mod])).
+
+can_mock_sticky_modules_test() ->
+    code:stick_mod(meck_test_module),
+    meck:new(meck_test_module, [unstick]),
+    ?assertNot(code:is_sticky(meck_test_module)),
+    meck:unload(meck_test_module),
+    ?assert(code:is_sticky(meck_test_module)),
+    code:unstick_mod(meck_test_module).
+
+
+sticky_directory_test_() ->
+    {foreach, fun sticky_setup/0, fun sticky_teardown/1,
+     [{with, [T]}
+      || T <- [fun ?MODULE:can_mock_sticky_module_not_yet_loaded_/1,
+               fun ?MODULE:cannot_mock_sticky_module_without_unstick_/1]]}.
+
+sticky_setup() ->
+    % Find out where the beam file is (purge because it is cover compiled)
+    false = code:purge(meck_test_module),
+    {module, meck_test_module} = code:load_file(meck_test_module),
+    Beam = code:which(meck_test_module),
+
+    % Create new sticky dir and copy beam file
+    Dir = "sticky_test",
+    ok = filelib:ensure_dir(filename:join(Dir, "dummy")),
+    Dest = filename:join(Dir, filename:basename(Beam)),
+    {ok, _BytesCopied} = file:copy(Beam, Dest),
+    true = code:add_patha(Dir),
+    ok = code:stick_dir(Dir),
+
+    % Unload module so it's not loaded when running meck
+    false = code:purge(meck_test_module),
+    true = code:delete(meck_test_module),
+    {meck_test_module, {Dir, Dest}}.
+
+sticky_teardown({Mod, {Dir, Dest}}) ->
+    % Clean up
+    ok = code:unstick_dir(Dir),
+    false = code:purge(Mod),
+    true = code:del_path(Dir),
+    ok = file:delete(Dest),
+    ok = file:del_dir(Dir).
+
+can_mock_sticky_module_not_yet_loaded_({Mod, _}) ->
+    ?assertEqual(ok, meck:new(Mod, [unstick])),
+    ?assertNot(code:is_sticky(Mod)),
+    ?assertEqual(ok, meck:unload(Mod)),
+    ?assert(code:is_sticky(Mod)).
+
+cannot_mock_sticky_module_without_unstick_({Mod, _}) ->
+    ?assertError(module_is_sticky, meck:new(Mod, [no_link])).
+
+can_mock_non_sticky_module_test() ->
+    ?assertNot(code:is_sticky(meck_test_module)),
+    ?assertEqual(ok, meck:new(meck_test_module, [unstick])),
+    ?assertNot(code:is_sticky(meck_test_module)),
+    ?assertEqual(ok, meck:unload(meck_test_module)),
+    ?assertNot(code:is_sticky(meck_test_module)).
