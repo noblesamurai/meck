@@ -14,6 +14,7 @@
 %% limitations under the License.
 %%==============================================================================
 
+%% @hidden
 %% @author Adam Lindberg <eproxus@gmail.com>
 %% @copyright 2011, Adam Lindberg & Erlang Solutions Ltd
 %% @doc Module wrangling helper functions.
@@ -22,6 +23,7 @@
 
 %% Interface exports
 -export([abstract_code/1]).
+-export([add_exports/2]).
 -export([beam_file/1]).
 -export([compile_and_load_forms/1]).
 -export([compile_and_load_forms/2]).
@@ -31,6 +33,7 @@
 %% Types
 -type erlang_form() :: term().
 -type compile_options() :: [term()].
+-type export() :: {atom(), byte()}.
 
 %%==============================================================================
 %% Interface exports
@@ -45,6 +48,12 @@ abstract_code(BeamFile) ->
             throw(no_abstract_code)
     end.
 
+-spec add_exports([export()], erlang_form()) -> erlang_form().
+add_exports(Exports, AbsCode) ->
+    {attribute, Line, export, OrigExports} = lists:keyfind(export, 3, AbsCode),
+    Attr = {attribute, Line, export, OrigExports ++ Exports},
+    lists:keyreplace(export, 3, AbsCode, Attr).
+
 -spec beam_file(module()) -> binary().
 beam_file(Module) ->
     % code:which/1 cannot be used for cover_compiled modules
@@ -53,32 +62,41 @@ beam_file(Module) ->
         error                  -> throw({object_code_not_found, Module})
     end.
 
--spec compile_and_load_forms(erlang_form()) -> ok.
+-spec compile_and_load_forms(erlang_form()) -> binary().
 compile_and_load_forms(AbsCode) -> compile_and_load_forms(AbsCode, []).
 
--spec compile_and_load_forms(erlang_form(), compile_options()) -> ok.
+-spec compile_and_load_forms(erlang_form(), compile_options()) -> binary().
 compile_and_load_forms(AbsCode, Opts) ->
     case compile:forms(AbsCode, Opts) of
         {ok, ModName, Binary} ->
-            load_binary(ModName, Binary);
+            load_binary(ModName, Binary),
+            Binary;
         {ok, ModName, Binary, _Warnings} ->
-            load_binary(ModName, Binary)
+            load_binary(ModName, Binary),
+            Binary;
+        Error ->
+            exit({compile_forms, Error})
     end.
 
 -spec compile_options(binary() | module()) -> compile_options().
 compile_options(BeamFile) when is_binary(BeamFile) ->
     case beam_lib:chunks(BeamFile, [compile_info]) of
         {ok, {_, [{compile_info, Info}]}} ->
-            proplists:get_value(options, Info);
+          filter_options(proplists:get_value(options, Info));
         _ ->
             []
     end;
 compile_options(Module) ->
-    proplists:get_value(options, Module:module_info(compile)).
+  filter_options(proplists:get_value(options, Module:module_info(compile))).
 
 -spec rename_module(erlang_form(), module()) -> erlang_form().
-rename_module([{attribute, Line, module, _OldName}|T], NewName) ->
-    [{attribute, Line, module, NewName}|T];
+rename_module([{attribute, Line, module, OldAttribute}|T], NewName) ->
+    case OldAttribute of
+        {_OldName, Variables} ->
+            [{attribute, Line, module, {NewName, Variables}}|T];
+        _OldName ->
+            [{attribute, Line, module, NewName}|T]
+    end;
 rename_module([H|T], NewName) ->
     [H|rename_module(T, NewName)].
 
@@ -91,3 +109,10 @@ load_binary(Name, Binary) ->
         {module, Name}  -> ok;
         {error, Reason} -> exit({error_loading_module, Name, Reason})
     end.
+
+% parse transforms have already been applied to the abstract code in the
+% module, and often are not always available when compiling the forms, so
+% filter them out of the options
+filter_options (Options) ->
+    lists:filter(fun({parse_transform,_}) -> false; (_) -> true end, Options).
+
